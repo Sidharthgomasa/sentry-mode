@@ -2,16 +2,18 @@ import cv2
 import face_recognition
 import numpy as np
 import os
+import time  # <--- Added for cooldown timer
 from datetime import datetime
+from comms import trigger_alert  # <--- Import your Telegram bot
 
 # --- CONFIGURATION ---
-# Create a folder named 'known_faces' and put your photo 'me.jpg' inside it first!
 KNOWN_FACES_DIR = "known_faces"
-TOLERANCE = 0.6  # Lower = Stricter
+TOLERANCE = 0.6 
+ALERT_COOLDOWN = 10  # Seconds between Telegram messages (so it doesn't spam)
 
 print("--- SENTRY MODE INITIALIZING ---")
 
-# 1. Load Known Faces (The "Whitelist")
+# 1. Load Known Faces
 known_face_encodings = []
 known_face_names = []
 
@@ -23,21 +25,25 @@ print("Loading authorized personnel...")
 for filename in os.listdir(KNOWN_FACES_DIR):
     if filename.endswith(".jpg") or filename.endswith(".png"):
         image = face_recognition.load_image_file(f"{KNOWN_FACES_DIR}/{filename}")
-        encoding = face_recognition.face_encodings(image)[0]
-        known_face_encodings.append(encoding)
-        known_face_names.append(os.path.splitext(filename)[0].upper())
-        print(f"Loaded: {filename}")
+        try:
+            encoding = face_recognition.face_encodings(image)[0]
+            known_face_encodings.append(encoding)
+            known_face_names.append(os.path.splitext(filename)[0].upper())
+            print(f"Loaded: {filename}")
+        except IndexError:
+            print(f"SKIPPED: Could not find a face in {filename}")
 
 # 2. Camera Setup
 video_capture = cv2.VideoCapture(0)
+last_alert_time = 0  # <--- Timer initialization
 
 while True:
     ret, frame = video_capture.read()
     if not ret: break
 
-    # Optimize: Process every other frame or resize to 1/4th for speed
+    # Optimize & Fix for Dlib
     small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_small_frame = small_frame[:, :, ::-1] # Convert BGR to RGB
+    rgb_small_frame = np.ascontiguousarray(small_frame[:, :, ::-1])
 
     # Detect faces
     face_locations = face_recognition.face_locations(rgb_small_frame)
@@ -53,9 +59,10 @@ while True:
         name = "UNKNOWN"
 
         face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
-        best_match_index = np.argmin(face_distances)
-        if matches[best_match_index]:
-            name = known_face_names[best_match_index]
+        if len(face_distances) > 0:
+            best_match_index = np.argmin(face_distances)
+            if matches[best_match_index]:
+                name = known_face_names[best_match_index]
         
         face_names.append(name)
 
@@ -66,25 +73,29 @@ while True:
     if intrusion:
         status = "BREACH DETECTED"
         color = (0, 0, 255) # Red
-        # Blur the whole screen to hide content
+        
+        # --- TELEGRAM ALERT LOGIC ---
+        current_time = time.time()
+        if (current_time - last_alert_time) > ALERT_COOLDOWN:
+            print(">> INTRUDER DETECTED! Sending photo to Telegram...")
+            trigger_alert(frame) # <--- Sends the photo
+            last_alert_time = current_time
+        # ----------------------------
+
+        # Visual Punishment (Blur)
         frame = cv2.blur(frame, (50, 50))
+        
     elif len(face_names) > 0:
         status = f"ACCESS GRANTED: {face_names[0]}"
         color = (0, 255, 0) # Green
 
-    # Draw UI
-    # We draw on the original 'frame'
+    # UI Drawing
     for (top, right, bottom, left), name in zip(face_locations, face_names):
-        # Scale back up (since we detected on 1/4th size)
         top *= 4; right *= 4; bottom *= 4; left *= 4
-        
-        # Draw Box
         cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
         cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
 
-    # Status Bar
     cv2.putText(frame, status, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
     cv2.imshow('Sentry Mode', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
