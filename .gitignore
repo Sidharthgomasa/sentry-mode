@@ -1,0 +1,7 @@
+
+__pycache__/
+*.pyc
+.env
+.DS_Store
+# Ignore the folder where you store your face images for privacy
+known_faces/
